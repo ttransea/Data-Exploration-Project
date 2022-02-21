@@ -1,0 +1,165 @@
+---
+title: "Data Exploration Project"
+author: "Tracy Tran"
+date: "2/18/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# ECON 4110 01 - Data Exploration Project
+## Load libraries
+
+```{r}
+library(lubridate)
+library(dplyr)
+library(tidyverse)
+library(janitor)
+library(car)
+library(jtools)
+library(tidyr)
+library(purrr)
+library(haven)
+```
+## Load data
+```{r}
+#Load all trends_up_to files and combine them into 1 list
+ggtrend <- list.files(path = "Data Exploration",  pattern = "trends_up_to_", full.names = TRUE) %>% lapply(read_csv) %>% bind_rows
+
+#Load Scorecard and ID files
+mrc <- read.csv("Most+Recent+Cohorts+(Scorecard+Elements).csv")
+id_name_link <- read.csv("id_name_link.csv")
+```
+## Data preparation
+```{r}
+#Remove duplicate university name
+id_name_link <- id_name_link %>% group_by(schname) %>% mutate(N =n()) %>% filter(N==1)
+
+#Convert the earning variable to numeric
+mrc$md_earn_wne_p10.REPORTED.EARNINGS = as.numeric(as.character(mrc$md_earn_wne_p10.REPORTED.EARNINGS))
+
+#Create a binary variable for High/Low income
+mrc$highEarn<- ifelse(mrc$md_earn_wne_p10.REPORTED.EARNINGS >= 60000, "High", "Low")
+
+#Rename OPEID in id_name_link for join purpose
+names(id_name_link)[names(id_name_link) == 'opeid'] <- 'OPEID'
+
+#Join id_name_link and ggtrend
+trendbyID <- id_name_link %>% left_join(ggtrend, by = 'schname')
+
+#Rename unitid to UNITID for join purpose
+names(trendbyID)[names(trendbyID) == 'unitid'] <- 'UNITID'
+
+#Join trendbyID with mrc
+trendScore <- trendbyID %>% left_join(mrc, by = c('UNITID' = 'UNITID', 'OPEID' = 'OPEID'))
+
+# Filter out the colleges that predominantly grant bachelor's degrees
+trendScore <- trendScore %>% filter(PREDDEG == 3 , na.rm = TRUE)
+
+#Keep only necessary columns
+trendScore_rec <- trendScore %>% select(UNITID, OPEID, schname,keyword, monthorweek, PREDDEG, md_earn_wne_p10.REPORTED.EARNINGS, highEarn, index)
+
+#Standardize Index and Group the data by Month and UNITID
+trendScore_rec_grouped <- trendScore_rec %>% mutate (date = as.Date(str_sub(monthorweek,1,10))) %>% 
+  group_by (schname, keyword) %>% mutate(index_sd = (index - mean(index,na.rm = TRUE))/sd(index, na.rm = TRUE)) %>% 
+  group_by (date = floor_date(date, "month"), UNITID, md_earn_wne_p10.REPORTED.EARNINGS,highEarn) %>% 
+  summarize(index_sd = mean(index_sd, na.rm = TRUE))
+
+#Remove NA/missing values
+trendScore_rec_grouped_cleaned <- drop_na(trendScore_rec_grouped )
+
+```
+
+## Build Regression
+```{r}
+
+#Create treatment group and control group. The date is set as "2015-10-01" since Scorecard was released on September 15th 2015. 
+
+trendScore_rec_grouped_cleaned <- trendScore_rec_grouped_cleaned %>% 
+  mutate (treated = md_earn_wne_p10.REPORTED.EARNINGS >= 60000, post_treatment = date >= as.Date("2015-10-01"))
+
+#Build Diference in Difference model
+DiD <- lm(index_sd ~ treated * post_treatment  , data = trendScore_rec_grouped_cleaned)
+export_summs(DiD , digits = 2)
+```
+
+## Visualize data
+
+
+
+```{r pressure, echo=FALSE}
+#Scatter plot
+ggplot(trendScore_rec_grouped_cleaned , aes(post_treatment, index_sd, color = treated)) +
+  geom_jitter() +
+  theme_minimal()
+## The scatter plot
+
+#Dual line plot using un-dummy variable
+
+ggplot(trendScore_rec_grouped_cleaned , aes(date, index_sd, color = highEarn)) +
+  stat_summary(geom = 'line') +
+  geom_vline(xintercept = as.Date ("2015-10-01")) +
+  theme_minimal()
+```
+
+## Analysis
+
+### Introduction
+The goal of this project is to answer the question :  Among colleges that predominantly grant bachelor’s degrees, did the release of the Scorecard shift student interest to high-earnings colleges relative to low-earnings ones (as proxied by Google searches for keywords associated with those colleges)?
+
+### The cleaning
+
+Remove duplicate university names in id_name_link.
+Join id_name_link and the ggtrend files using "schname" as the foreign key.
+Join the above file with the Scorecard file using "OPEID" and "UNITID" to match the records.
+
+
+After cleaning, the variables used in the analysis include:
+
+1. The date that the trending index is conducted\
+2. Unit ID for institution\
+3. Median earnings of students working and not enrolled 6 years after entry \
+4. A binary variable for earning above and below $50K (High - Low)\
+Note : Accoridng to askwonder.com, the avarage salary for individuals with five to nine years of experience is $63,235 \
+5. Standardized trending index\
+
+### Reasons for choice of model
+
+The model used to analyze the relationship between the release of scorecard and student interest is Difference in Differences model. The reasons to consider this model are :
+
+1. We want to compare the before and after the event of Scorecard release.
+
+2. We cannot control the variable of time, in this dataset : the date that google trend index is conducted, because this would create washed out variable bias.
+
+
+### The model
+
+In the Difference in differences (DiD) model, the treated group is the universities that median income after 6 years of graduation is high, the control group is the university that median income after
+6 years of graduation is high. The release of scorecard is the treatment.
+
+### The result
+
+From the model, there are 10% more likely that student will shift their interest into the universities that median income after 6 years of graduation is high. In other words, the universities that median income after 6 years of graduation is high are 10% more likely to be searched on Google by the keywords  associated with them.
+
+Based on the p-value, we reject the null hypothesis that there's no difference between the treated group and control group after the treatment went into effect. We can assume that there’s no statistically significant evidence that the the treated and control group had the same search level in the post-treatment period. 
+
+### The visualization
+
+1. The scatterplot 
+
+This plot isn’t very perspicuous in showing the change before and after the treatment. However, we can see that before the treatment, universities that median income after 6 years of graduation is low was searched more.\
+
+2. The line chart
+
+The chart is divided into two period : The period after the vertical line is the post treatment period, where the Scorecard was released. 
+
+The pre-treatment trend of the two groups was similar. After the treatment went into effect, the search index for universities with "high earning" significant increased while the search for "low earning" universities did not change.
+
+Note that the Scorecard was released in the beginning of September 2015. September was also the start of academic years for most university in the U.S. The search for "high earning" universities rocketed beginning from the beginning of 2016. This means whe students started searching for schools for the new academic year, "high-earning" schools were searched more than the "low-earning" ones.
+
+### Conclusion
+The release of Scorecard led people to search more often for "high-earning" universities. However, the change in searching trend is not very notably.The Scorecard had a small effects on search trend or aggregated search activity. 
+
+
+
